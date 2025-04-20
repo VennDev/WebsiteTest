@@ -24,6 +24,7 @@ except Exception as e:
     raise
 
 # Define features and columns to drop
+# Updated FEATURES to match the model's training columns, including attack_type
 FEATURES = [
     'unnamed_0', 'flow_id', 'source_ip', 'source_port', 'destination_ip', 'destination_port',
     'protocol', 'timestamp', 'flow_duration', 'total_fwd_packets', 'total_backward_packets',
@@ -47,27 +48,19 @@ FEATURES = [
     'init_win_bytes_forward', 'init_win_bytes_backward', 'act_data_pkt_fwd',
     'min_seg_size_forward', 'active_mean', 'active_std', 'active_max',
     'active_min', 'idle_mean', 'idle_std', 'idle_max', 'idle_min',
-    'simillarhttp', 'inbound', 'label', 'unique_source_ips', 'packet_rate',
-    'http_request_rate'
+    'simillarhttp', 'inbound', 'label', 'attack_type'
 ]
 
 DROP_COLS = [
     'unnamed_0', 'flow_id', 'source_ip', 'destination_ip',
-    'source_port', 'destination_port', 'timestamp', 'protocol'
+    'source_port', 'destination_port', 'timestamp', 'protocol',
+    'label', 'attack_type'  # Exclude label and attack_type from prediction
 ]
 
 # Store request timestamps for rate limiting and analysis
 request_log = defaultdict(list)
 # Store analysis history for dashboard
 analysis_history = []
-
-# Get the feature names that the scaler was trained on
-# This assumes the scaler was fitted with a DataFrame and we can access its feature names
-try:
-    scaler_feature_names = scaler.feature_names_in_ if hasattr(scaler, 'feature_names_in_') else None
-except Exception as e:
-    logging.warning(f"Could not retrieve scaler feature names: {e}")
-    scaler_feature_names = None
 
 def preprocess_data(data):
     """Preprocess input data for model prediction"""
@@ -80,26 +73,15 @@ def preprocess_data(data):
             if feature not in df.columns and feature not in DROP_COLS:
                 df[feature] = 0
         
-        # Drop unnecessary columns
+        # Drop unnecessary columns, including label and attack_type
         df = df.drop(columns=[col for col in DROP_COLS if col in df.columns], errors='ignore')
-        
-        # If scaler feature names are available, drop features not seen during fit
-        if scaler_feature_names is not None:
-            unseen_features = [col for col in df.columns if col not in scaler_feature_names]
-            df = df.drop(columns=unseen_features, errors='ignore')
-            logging.info(f"Dropped unseen features: {unseen_features}")
-        
-        # Add missing features that the scaler expects
-        if scaler_feature_names is not None:
-            for feature in scaler_feature_names:
-                if feature not in df.columns:
-                    df[feature] = 0
         
         # Scale numerical features
         numerical_cols = df.select_dtypes(include=['int64', 'float64']).columns
         if numerical_cols.empty:
             raise ValueError("No numerical columns to scale.")
         
+        logging.info(f"Columns before scaling: {df.columns.tolist()}")
         df[numerical_cols] = scaler.transform(df[numerical_cols])
         
         return df
@@ -167,9 +149,6 @@ def index():
             'bwd_packet_length_min': 0,
             'bwd_packet_length_mean': 0,
             'bwd_packet_length_std': 0,
-            'http_request_rate': http_request_rate,
-            'simillarhttp': 1 if 'http' in user_agent.lower() else 0,
-            'inbound': 1,
             'flow_bytess': 0,
             'flow_packetss': 0,
             'flow_iat_mean': 0,
@@ -234,8 +213,8 @@ def index():
             'idle_std': 0,
             'idle_max': 0,
             'idle_min': 0,
-            'unique_source_ips': 1,
-            'packet_rate': http_request_rate
+            'simillarhttp': 1 if 'http' in user_agent.lower() else 0,
+            'inbound': 1
         }
         
         # Analyze traffic
