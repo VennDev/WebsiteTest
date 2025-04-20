@@ -1,21 +1,22 @@
 import pandas as pd
 import numpy as np
-from flask import Flask, request, render_template, jsonify
+from flask import Flask, request, jsonify, g
 from scapy.all import sniff, IP, TCP, UDP, get_working_ifaces
 from tensorflow.keras.models import load_model
 import joblib
 import threading
-import time
-from collections import defaultdict
-from datetime import datetime
 import socket
 import struct
 import logging
+from collections import defaultdict
+from datetime import datetime
 
 app = Flask(__name__)
 
+# Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Load model and preprocessors
 try:
     model = load_model('model.keras')
     scaler = joblib.load('scaler.pkl')
@@ -24,6 +25,7 @@ except Exception as e:
     logging.error(f"Failed to load model or preprocessors: {e}")
     raise
 
+# Define features and columns to drop
 FEATURES = [
     'unnamed_0', 'flow_id', 'source_ip', 'source_port', 'destination_ip', 'destination_port',
     'protocol', 'timestamp', 'flow_duration', 'total_fwd_packets', 'total_backward_packets',
@@ -55,8 +57,8 @@ DROP_COLS = [
     'source_port', 'destination_port', 'timestamp', 'protocol'
 ]
 
+# Global variables for packet capture
 captured_packets = []
-capture_active = False
 capture_lock = threading.Lock()
 
 def ip_to_int(ip):
@@ -75,24 +77,20 @@ def get_active_interface():
     raise Exception("No valid network interface found")
 
 def packet_callback(packet):
-    global captured_packets
-    if capture_active and (IP in packet) and (TCP in packet or UDP in packet):
-        with capture_lock:
+    with capture_lock:
+        if (IP in packet) and (TCP in packet or UDP in packet):
             logging.debug(f"Captured packet: {packet.summary()}")
             captured_packets.append(packet)
 
-def start_packet_capture(interface, duration=20):
-    global captured_packets, capture_active
+def capture_packets(interface, client_ip, duration=5):
+    global captured_packets
     captured_packets = []
-    capture_active = True
-    filter_str = "tcp port 5000 or udp port 5000"
-    logging.info(f"Starting packet capture on {interface} for {duration} seconds...")
+    filter_str = f"host {client_ip} and (tcp or udp)"
+    logging.info(f"Starting packet capture for {client_ip} on {interface} for {duration} seconds...")
     try:
         sniff(iface=interface, prn=packet_callback, filter=filter_str, timeout=duration, store=False)
     except Exception as e:
         logging.error(f"Packet capture failed: {e}")
-        raise
-    capture_active = False
     logging.info(f"Capture complete. {len(captured_packets)} packets captured.")
 
 def extract_features(packets, client_ip):
@@ -160,6 +158,10 @@ def extract_features(packets, client_ip):
             'destination_ip': ip_to_int(dst_ip),
             'destination_port': dst_port,
             'protocol': proto,
+_GET / HTTP/1.1
+Host: localhost:5000
+User-Agent: curl/7.68.0
+Accept: */*
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
             'flow_duration': flow_duration,
             'total_fwd_packets': total_fwd_packets,
@@ -260,72 +262,72 @@ def extract_features(packets, client_ip):
     logging.debug(f"Extracted features DataFrame:\n{df}")
     return df
 
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/get_client_ip', methods=['GET'])
-def get_client_ip():
+@app.before_request
+def before_request():
     try:
         client_ip = request.remote_addr
-        logging.info(f"Detected client IP: {client_ip}")
-        return jsonify({'status': 'success', 'client_ip': client_ip}), 200
-    except Exception as e:
-        logging.error(f"Get client IP error: {e}")
-        return jsonify({'status': 'error', 'message': f'Error: {str(e)}'}), 500
-
-@app.route('/start_capture', methods=['POST'])
-def start_capture():
-    try:
-        if not request.is_json:
-            return jsonify({'status': 'error', 'message': 'Request must be JSON'}), 400
-        
-        data = request.get_json()
-        client_ip = data.get('client_ip')
-        if not client_ip:
-            return jsonify({'status': 'error', 'message': 'Client IP is required'}), 400
-
+        logging.info(f"Processing request from client IP: {client_ip}")
         interface = get_active_interface()
-        capture_thread = threading.Thread(target=start_packet_capture, args=(interface, 20))
-        capture_thread.start()
-        capture_thread.join()
-        if not captured_packets:
-            return jsonify({'status': 'error', 'message': 'No packets captured'}), 200
-        return jsonify({'status': 'success', 'message': f'Captured {len(captured_packets)} packets'}), 200
-    except Exception as e:
-        logging.error(f"Start capture error: {e}")
-        return jsonify({'status': 'error', 'message': f'Error: {str(e)}'}), 500
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    try:
-        if not request.is_json:
-            return jsonify({'status': 'error', 'message': 'Request must be JSON'}), 400
         
-        data = request.get_json()
-        client_ip = data.get('client_ip')
-        if not client_ip:
-            return jsonify({'status': 'error', 'message': 'Client IP is required'}), 400
+        # Run packet capture in a separate thread
+        capture_thread = threading.Thread(target=capture_packets, args=(interface, client_ip, 5))
+        capture_thread.start()
+        capture_thread.join()  # Wait for capture to complete
+        
+        # Store captured packets and client IP in Flask's g object
+        g.client_ip = client_ip
+        g.packets = captured_packets
+    except Exception as e:
+        logging.error(f"Error in before_request: {e}")
+        g.client_ip = None
+        g.packets = []
 
-        features_df = extract_features(captured_packets, client_ip)
+@app.route('/')
+def index():
+    try:
+        client_ip = getattr(g, 'client_ip', None)
+        packets = getattr(g, 'packets', [])
+        
+        if not client_ip or not packets:
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to capture packets or identify client IP'
+            }), 200
+
+        # Extract features and predict
+        features_df = extract_features(packets, client_ip)
         if features_df.empty:
-            return jsonify({'status': 'error', 'message': 'No features extracted from packets'}), 200
+            return jsonify({
+                'status': 'error',
+                'message': 'No features extracted from packets'
+            }), 200
 
         features_scaled = scaler.transform(features_df)
-        
         predictions = model.predict(features_scaled)
         decoded_predictions = label_encoder.inverse_transform(predictions.argmax(axis=1))
         
+        # Prepare results
         results = []
         for i, pred in enumerate(decoded_predictions):
             src_ip = socket.inet_ntoa(struct.pack('>I', int(features_df.iloc[i]['source_ip'])))
             results.append({'source_ip': src_ip, 'prediction': pred})
         
-        return jsonify({'status': 'success', 'predictions': results}), 200
+        # Check if any prediction indicates an attack
+        is_attack = any(pred.lower() in ['attack', 'malicious', 'intrusion'] for pred in decoded_predictions)
+        
+        return jsonify({
+            'status': 'success',
+            'client_ip': client_ip,
+            'predictions': results,
+            'is_attack': is_attack
+        }), 200
     
     except Exception as e:
-        logging.error(f"Predict error: {e}")
-        return jsonify({'status': 'error', 'message': f'Error: {str(e)}'}), 500
+        logging.error(f"Index route error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
