@@ -74,6 +74,8 @@ traffic_samples_by_ip = defaultdict(lambda: [[] for _ in range(50)])  # 50 stack
 current_stack_index = defaultdict(int)
 # Store analysis history for dashboard
 analysis_history = []
+# Store banned IPs with their expiration time (timestamp when ban expires)
+banned_ips = {}  # {ip_address: expiration_timestamp}
 # Store raw network packets for processing
 network_data = {
     'packets': [],
@@ -338,12 +340,22 @@ def start_sniffing():
 
 @app.route('/')
 def index():
-    global current_stack_index
+    global current_stack_index, banned_ips
     try:
         ip_address = request.remote_addr
         current_time = datetime.now()
         current_timestamp = time.time()
-        
+
+        # Check if the IP is banned
+        if ip_address in banned_ips:
+            if current_timestamp < banned_ips[ip_address]:
+                remaining_time = int(banned_ips[ip_address] - current_timestamp)
+                return f"IP {ip_address} has been banned due to DDoS attack detection. Ban will be lifted in {remaining_time} seconds."
+            else:
+                # Remove the IP from banned list if ban has expired
+                del banned_ips[ip_address]
+                logging.info(f"IP {ip_address} has been unbanned.")
+
         request_timestamps[ip_address].append(current_timestamp)
         
         http_request_rate = calculate_request_rate(ip_address)
@@ -469,6 +481,12 @@ def index():
                 confidence = 0.95
                 is_attack = True
             
+            # Ban the IP if a DDoS attack is detected
+            if is_attack:
+                ban_duration = 3600  # 1 hour in seconds
+                banned_ips[ip_address] = current_timestamp + ban_duration
+                logging.info(f"IP {ip_address} has been banned for {ban_duration} seconds due to DDoS attack detection.")
+
             # Store in history only after analysis
             analysis_history.append({
                 'ip_address': ip_address,
