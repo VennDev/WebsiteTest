@@ -184,7 +184,7 @@ def packet_callback(packet):
 def process_network_data():
     """Process captured network data and calculate features"""
     current_time = time.time()
-    if current_time - network_data['last_processed'] < 2:  # Reduced from 5 to 2 seconds
+    if current_time - network_data['last_processed'] < 2:
         return None
 
     packets = network_data['packets']
@@ -439,9 +439,14 @@ def index():
         if len(current_stack) > 100:
             current_stack.pop(0)
         
-        result, confidence = "Waiting for more data", 0.0
-        is_attack = False
-        if len(current_stack) == 100:  # Increased from 50 to 100
+        # Initialize variables for rendering
+        render_vars = {
+            'ip_address': ip_address,
+            'is_attack': False  # Default value
+        }
+        
+        # Only process and return results when stack is full
+        if len(current_stack) == 100:
             traffic_df = pd.DataFrame(current_stack)
             result, confidence = analyze_traffic(traffic_df)
             is_attack = "attack" in result.lower()
@@ -453,9 +458,9 @@ def index():
             
             # Improved LOIC detection
             if (protocol == 17 and 
-                avg_flow_packetss > 50 and  # Reduced from 100 to 50
-                avg_packet_length_std < 10 and  # Check for consistent packet sizes
-                udp_port_consistency):  # Check for consistent destination port
+                avg_flow_packetss > 50 and
+                avg_packet_length_std < 10 and
+                udp_port_consistency):
                 result = "LOIC UDP Flood"
                 confidence = 0.95
                 is_attack = True
@@ -479,12 +484,15 @@ def index():
             
             traffic_samples_by_ip[ip_address][current_stack_index[ip_address]] = []
             current_stack_index[ip_address] = (current_stack_index[ip_address] + 1) % 50
+            
+            # Update render variables with results
+            render_vars.update({
+                'result': result,
+                'confidence': f"{confidence:.2%}",
+                'is_attack': is_attack
+            })
         
-        return render_template('index.html', 
-                            result=result,
-                            confidence=f"{confidence:.2%}",
-                            is_attack=is_attack,
-                            ip_address=ip_address)
+        return render_template('index.html', **render_vars)
     except Exception as e:
         logging.error(f"Error in index route: {e}")
         return render_template('error.html', error=str(e))
