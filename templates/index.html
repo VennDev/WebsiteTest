@@ -3,82 +3,34 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Network Traffic Analysis</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <title>DDoS Detection System</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 </head>
-<body class="bg-gray-100 flex items-center justify-center min-h-screen">
-    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-        <h1 class="text-2xl font-bold text-center mb-6">Network Traffic Analysis</h1>
-        <div id="loading" class="text-center text-gray-600">
-            <p>Analyzing your network traffic...</p>
-            <div class="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto mt-4"></div>
-        </div>
-        <div id="result" class="hidden">
-            <p class="text-lg font-semibold">Client IP: <span id="client-ip" class="text-blue-600"></span></p>
-            <p class="text-lg font-semibold mt-2">Attack Detected: <span id="is-attack" class="font-bold"></span></p>
-            <div class="mt-4">
-                <h2 class="text-xl font-semibold">Predictions:</h2>
-                <ul id="predictions" class="list-disc pl-5 mt-2"></ul>
+<body class="bg-gray-900 text-white min-h-screen">
+    <nav class="bg-gray-800 p-4">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-xl font-bold">DDoS Detection System</h1>
+            <div>
+                <a href="/" class="text-gray-300 hover:text-white mx-4">Home</a>
+                <a href="/dashboard" class="text-gray-300 hover:text-white mx-4">Dashboard</a>
             </div>
-            <p id="error" class="text-red-600 mt-4 hidden"></p>
         </div>
-        <button id="retry" class="mt-6 w-full bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600 hidden">Retry Analysis</button>
+    </nav>
+    <div class="container mx-auto mt-8 p-4">
+        <div class="bg-gray-800 p-8 rounded-lg shadow-lg max-w-md mx-auto">
+            <h2 class="text-2xl font-bold mb-6 text-center">Traffic Analysis Result</h2>
+            <p class="text-gray-300 mb-4"><strong>IP Address:</strong> {{ ip_address }}</p>
+            <p class="text-gray-300 mb-4"><strong>Prediction:</strong> {{ result }}</p>
+            <p class="text-gray-300 mb-4"><strong>Confidence:</strong> {{ confidence }}</p>
+            {% if is_attack %}
+                <p class="text-red-500 font-bold mb-4">Warning: Potential DDoS attack detected!</p>
+            {% else %}
+                <p class="text-green-500 font-bold mb-4">No DDoS attack detected.</p>
+            {% endif %}
+            <a href="/dashboard" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded block text-center">
+                View Dashboard
+            </a>
+        </div>
     </div>
-
-    <script>
-        async function analyzeTraffic() {
-            // Show loading, hide results
-            document.getElementById('loading').classList.remove('hidden');
-            document.getElementById('result').classList.add('hidden');
-            document.getElementById('retry').classList.add('hidden');
-            document.getElementById('error').classList.add('hidden');
-
-            try {
-                const response = await fetch('http://localhost:5000/', {
-                    method: 'GET',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                const data = await response.json();
-
-                // Hide loading
-                document.getElementById('loading').classList.add('hidden');
-
-                if (data.status === 'success') {
-                    // Display results
-                    document.getElementById('result').classList.remove('hidden');
-                    document.getElementById('client-ip').textContent = data.client_ip;
-                    document.getElementById('is-attack').textContent = data.is_attack ? 'Yes' : 'No';
-                    document.getElementById('is-attack').className = data.is_attack ? 'text-red-600' : 'text-green-600';
-
-                    const predictionsList = document.getElementById('predictions');
-                    predictionsList.innerHTML = '';
-                    data.predictions.forEach(pred => {
-                        const li = document.createElement('li');
-                        li.textContent = `Source IP: ${pred.source_ip}, Prediction: ${pred.prediction}`;
-                        predictionsList.appendChild(li);
-                    });
-
-                    document.getElementById('retry').classList.remove('hidden');
-                } else {
-                    // Display error
-                    document.getElementById('error').textContent = data.message || 'An error occurred';
-                    document.getElementById('error').classList.remove('hidden');
-                    document.getElementById('retry').classList.remove('hidden');
-                }
-            } catch (error) {
-                // Handle network or other errors
-                document.getElementById('loading').classList.add('hidden');
-                document.getElementById('error').textContent = `Error: ${error.message}`;
-                document.getElementById('error').classList.remove('hidden');
-                document.getElementById('retry').classList.remove('hidden');
-            }
-        }
-
-        // Run analysis on page load
-        document.addEventListener('DOMContentLoaded', analyzeTraffic);
-
-        // Retry button event listener
-        document.getElementById('retry').addEventListener('click', analyzeTraffic);
-    </script>
 </body>
 </html>
