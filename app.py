@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Load model and preprocessors
 try:
-    model = load_model('model.keras')
+    model = load_model('my_model.keras')
     scaler = joblib.load('scaler.pkl')
     label_encoder = joblib.load('label_encoder.pkl')
     logging.info(f"Label encoder classes: {label_encoder.classes_}")
@@ -25,10 +25,9 @@ except Exception as e:
     logging.error(f"Failed to load model or preprocessors: {e}")
     raise
 
-# Define features and columns to drop
+# Define features and columns to drop (aligned with training data)
 FEATURES = [
-    'unnamed_0', 'flow_id', 'source_ip', 'source_port', 'destination_ip', 'destination_port',
-    'protocol', 'timestamp', 'flow_duration', 'total_fwd_packets', 'total_backward_packets',
+    'flow_duration', 'total_fwd_packets', 'total_backward_packets',
     'total_length_of_fwd_packets', 'total_length_of_bwd_packets', 'fwd_packet_length_max',
     'fwd_packet_length_min', 'fwd_packet_length_mean', 'fwd_packet_length_std',
     'bwd_packet_length_max', 'bwd_packet_length_min', 'bwd_packet_length_mean',
@@ -49,13 +48,13 @@ FEATURES = [
     'init_win_bytes_forward', 'init_win_bytes_backward', 'act_data_pkt_fwd',
     'min_seg_size_forward', 'active_mean', 'active_std', 'active_max',
     'active_min', 'idle_mean', 'idle_std', 'idle_max', 'idle_min',
-    'inbound', 'label', 'attack_type'
+    'inbound'
 ]
 
 DROP_COLS = [
     'unnamed_0', 'flow_id', 'source_ip', 'destination_ip',
     'source_port', 'destination_port', 'timestamp', 'protocol',
-    'label', 'attack_type'  # Exclude label and attack_type from prediction
+    'label', 'attack_type'
 ]
 
 # Store request timestamps for rate limiting and analysis
@@ -77,10 +76,10 @@ def preprocess_data(data_df):
     try:
         # Ensure all required features are present
         for feature in FEATURES:
-            if feature not in data_df.columns and feature not in DROP_COLS:
+            if feature not in data_df.columns:
                 data_df[feature] = 0
         
-        # Drop unnecessary columns, including label and attack_type
+        # Drop unnecessary columns
         data_df = data_df.drop(columns=[col for col in DROP_COLS if col in data_df.columns], errors='ignore')
         
         # Scale numerical features
@@ -108,7 +107,7 @@ def analyze_traffic(data_df):
         confidences = np.max(predictions, axis=1)
         
         # Aggregate results: if more than 50% of samples are attacks, classify as attack
-        attack_count = sum(1 for pred in predicted_classes if pred.lower() in ['attack', 'ddos', 'loic', 'hoic'])
+        attack_count = sum(1 for pred in predicted_classes if pred.lower() != 'benign')
         if attack_count > len(predicted_classes) * 0.5:  # More than 50% are attacks
             return "DDoS Attack", np.mean(confidences)
         else:
@@ -180,9 +179,9 @@ def process_network_data():
 
     return {
         'protocol': protocol,
-        'flow_duration': (current_time - timestamps[0]) * 1000 if timestamps else 1000,  # Convert to milliseconds
+        'flow_duration': (current_time - timestamps[0]) * 1000 if timestamps else 1000,
         'total_fwd_packets': total_packets,
-        'total_backward_packets': 0,  # Placeholder, needs actual calculation
+        'total_backward_packets': 0,
         'total_length_of_fwd_packets': total_length,
         'total_length_of_bwd_packets': 0,
         'fwd_packet_length_max': max(packet_lengths) if packet_lengths else 0,
@@ -225,12 +224,6 @@ def index():
 
         # Create traffic data sample
         traffic_data = {
-            'source_ip': ip_address,
-            'destination_ip': request.host.split(':')[0],
-            'source_port': 0,  # Not available in HTTP context
-            'destination_port': int(request.host.split(':')[1]) if ':' in request.host else 80,
-            'protocol': network_features.get('protocol', 6),  # Default to TCP if no network data
-            'timestamp': current_time.strftime('%Y-%m-%d %H:%M:%S'),
             'flow_duration': network_features.get('flow_duration', 1000),
             'total_fwd_packets': network_features.get('total_fwd_packets', 1),
             'total_backward_packets': network_features.get('total_backward_packets', 1),
@@ -334,11 +327,12 @@ def index():
             # Manual threshold for UDP flood (LOIC) and HTTP flood (HOIC) detection
             avg_flow_packetss = traffic_df['flow_packetss'].mean()
             avg_http_request_rate = sum(len(request_log[ip]) / 60.0 for ip in request_log) / max(len(request_log), 1)
-            if traffic_df['protocol'].mode()[0] == 17 and avg_flow_packetss > 100:  # High UDP packet rate
+            protocol = 6 if traffic_df['total_fwd_packets'].sum() >= traffic_df['total_backward_packets'].sum() else 17
+            if protocol == 17 and avg_flow_packetss > 100:  # High UDP packet rate
                 result = "LOIC UDP Flood"
                 confidence = 0.95
                 is_attack = True
-            elif traffic_df['protocol'].mode()[0] == 6 and avg_http_request_rate > 50:  # High HTTP request rate
+            elif protocol == 6 and avg_http_request_rate > 50:  # High HTTP request rate
                 result = "HOIC HTTP Flood"
                 confidence = 0.95
                 is_attack = True
