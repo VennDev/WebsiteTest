@@ -61,6 +61,14 @@ request_log = defaultdict(list)
 # Store analysis history for dashboard
 analysis_history = []
 
+# Get the feature names that the scaler was trained on
+# This assumes the scaler was fitted with a DataFrame and we can access its feature names
+try:
+    scaler_feature_names = scaler.feature_names_in_ if hasattr(scaler, 'feature_names_in_') else None
+except Exception as e:
+    logging.warning(f"Could not retrieve scaler feature names: {e}")
+    scaler_feature_names = None
+
 def preprocess_data(data):
     """Preprocess input data for model prediction"""
     try:
@@ -75,8 +83,23 @@ def preprocess_data(data):
         # Drop unnecessary columns
         df = df.drop(columns=[col for col in DROP_COLS if col in df.columns], errors='ignore')
         
+        # If scaler feature names are available, drop features not seen during fit
+        if scaler_feature_names is not None:
+            unseen_features = [col for col in df.columns if col not in scaler_feature_names]
+            df = df.drop(columns=unseen_features, errors='ignore')
+            logging.info(f"Dropped unseen features: {unseen_features}")
+        
+        # Add missing features that the scaler expects
+        if scaler_feature_names is not None:
+            for feature in scaler_feature_names:
+                if feature not in df.columns:
+                    df[feature] = 0
+        
         # Scale numerical features
         numerical_cols = df.select_dtypes(include=['int64', 'float64']).columns
+        if numerical_cols.empty:
+            raise ValueError("No numerical columns to scale.")
+        
         df[numerical_cols] = scaler.transform(df[numerical_cols])
         
         return df
