@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from flask import Flask, request, jsonify, g
-from scapy.all import sniff, IP, TCP, UDP, get_working_ifaces
+from scapy.all import sniff, IP, TCP, UDP, get_working_ifaces, get_if_list
 from tensorflow.keras.models import load_model
 import joblib
 import threading
@@ -10,6 +10,8 @@ import struct
 import logging
 from collections import defaultdict
 from datetime import datetime
+import os
+import netifaces
 
 app = Flask(__name__)
 
@@ -68,13 +70,46 @@ def ip_to_int(ip):
         logging.warning(f"Invalid IP address: {ip}")
         return 0
 
+def get_local_ip():
+    """Get the machine's local IP address."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception as e:
+        logging.error(f"Failed to get local IP: {e}")
+        return "127.0.0.1"
+
 def get_active_interface():
-    interfaces = get_working_ifaces()
-    for iface in interfaces:
-        if iface.is_valid():
-            logging.info(f"Selected interface: {iface.name}")
-            return iface.name
+    """Get a valid network interface, with fallback to manual selection."""
+    try:
+        interfaces = get_working_ifaces()
+        for iface in interfaces:
+            if iface.is_valid():
+                logging.info(f"Selected interface: {iface.name}")
+                return iface.name
+    except Exception as e:
+        logging.error(f"Failed to get working interfaces: {e}")
+    
+    # Fallback: List all interfaces and select the first with an IP
+    try:
+        for iface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(iface)
+            if netifaces.AF_INET in addrs:
+                logging.info(f"Fallback selected interface: {iface}")
+                return iface
+    except Exception as e:
+        logging.error(f"Failed to get fallback interface: {e}")
+    
     raise Exception("No valid network interface found")
+
+def check_permissions():
+    """Check if the script has sufficient permissions for packet capture."""
+    if os.name == 'posix' and os.geteuid() != 0:
+        return False
+    return True
 
 def packet_callback(packet):
     with capture_lock:
@@ -82,11 +117,12 @@ def packet_callback(packet):
             logging.debug(f"Captured packet: {packet.summary()}")
             captured_packets.append(packet)
 
-def capture_packets(interface, client_ip, duration=5):
+def capture_packets(interface, client_ip, duration=10):
     global captured_packets
     captured_packets = []
-    filter_str = f"host {client_ip} and (tcp or udp)"
-    logging.info(f"Starting packet capture for {client_ip} on {interface} for {duration} seconds...")
+    # Use a broader filter for debugging
+    filter_str = f"host {client_ip}" if client_ip and client_ip != "127.0.0.1" else "tcp or udp"
+    logging.info(f"Starting packet capture for {client_ip} on {interface} for {duration} seconds with filter: {filter_str}")
     try:
         sniff(iface=interface, prn=packet_callback, filter=filter_str, timeout=duration, store=False)
     except Exception as e:
@@ -158,10 +194,6 @@ def extract_features(packets, client_ip):
             'destination_ip': ip_to_int(dst_ip),
             'destination_port': dst_port,
             'protocol': proto,
-_GET / HTTP/1.1
-Host: localhost:5000
-User-Agent: curl/7.68.0
-Accept: */*
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
             'flow_duration': flow_duration,
             'total_fwd_packets': total_fwd_packets,
@@ -265,16 +297,29 @@ Accept: */*
 @app.before_request
 def before_request():
     try:
+        # Check permissions
+        if not check_permissions():
+            logging.error("Insufficient permissions for packet capture. Run as root/admin.")
+            g.client_ip = None
+            g.packets = []
+            return
+
         client_ip = request.remote_addr
-        logging.info(f"Processing request from client IP: {client_ip}")
+        logging.info(f"Detected client IP: {client_ip}")
+
+        # Fallback to local IP if client_ip is localhost
+        if client_ip == "127.0.0.1":
+            client_ip = get_local_ip()
+            logging.info(f"Client IP is localhost, using local IP: {client_ip}")
+
         interface = get_active_interface()
         
         # Run packet capture in a separate thread
-        capture_thread = threading.Thread(target=capture_packets, args=(interface, client_ip, 5))
+        capture_thread = threading.Thread(target=capture_packets, args=(interface, client_ip, 10))
         capture_thread.start()
         capture_thread.join()  # Wait for capture to complete
         
-        # Store captured packets and client IP in Flask's g object
+        # Store captured packets and client IP
         g.client_ip = client_ip
         g.packets = captured_packets
     except Exception as e:
@@ -324,6 +369,27 @@ def index():
     
     except Exception as e:
         logging.error(f"Index route error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }), 500
+
+@app.route('/debug_interfaces', methods=['GET'])
+def debug_interfaces():
+    """Debug endpoint to list available network interfaces."""
+    try:
+        interfaces = netifaces.interfaces()
+        iface_details = []
+        for iface in interfaces:
+            addrs = netifaces.ifaddresses(iface)
+            ip = addrs.get(netifaces.AF_INET, [{}])[0].get('addr', 'No IP')
+            iface_details.append({'interface': iface, 'ip': ip})
+        return jsonify({
+            'status': 'success',
+            'interfaces': iface_details
+        }), 200
+    except Exception as e:
+        logging.error(f"Debug interfaces error: {e}")
         return jsonify({
             'status': 'error',
             'message': f'Error: {str(e)}'
