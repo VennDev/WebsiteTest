@@ -10,6 +10,8 @@ from collections import defaultdict
 from scapy.all import sniff, IP, TCP, UDP
 import threading
 import socket
+import json
+import os
 
 app = Flask(__name__)
 
@@ -75,7 +77,13 @@ current_stack_index = defaultdict(int)
 # Store analysis history for dashboard
 analysis_history = []
 # Store banned IPs with their expiration time (timestamp when ban expires)
-banned_ips = {}  # {ip_address: expiration_timestamp}
+# Load banned IPs from file if exists, otherwise initialize as empty dict
+BANNED_IPS_FILE = 'banned_ips.json'
+if os.path.exists(BANNED_IPS_FILE):
+    with open(BANNED_IPS_FILE, 'r') as f:
+        banned_ips = json.load(f)
+else:
+    banned_ips = {}  # {ip_address: expiration_timestamp}
 # Store raw network packets for processing
 network_data = {
     'packets': [],
@@ -97,6 +105,11 @@ network_data = {
     'init_win_backward': None,
     'udp_dest_ports': set()  # Track destination ports for UDP packets
 }
+
+def save_banned_ips():
+    """Save banned IPs to file"""
+    with open(BANNED_IPS_FILE, 'w') as f:
+        json.dump(banned_ips, f)
 
 def preprocess_data(data_df):
     """Preprocess a DataFrame of traffic data for model prediction"""
@@ -347,14 +360,17 @@ def index():
         current_timestamp = time.time()
 
         # Check if the IP is banned
+        logging.info(f"Checking if IP {ip_address} is banned. Current banned IPs: {banned_ips}")
         if ip_address in banned_ips:
             if current_timestamp < banned_ips[ip_address]:
                 remaining_time = int(banned_ips[ip_address] - current_timestamp)
+                logging.info(f"IP {ip_address} is banned. Ban will be lifted in {remaining_time} seconds.")
                 return f"IP {ip_address} has been banned due to DDoS attack detection. Ban will be lifted in {remaining_time} seconds."
             else:
                 # Remove the IP from banned list if ban has expired
+                logging.info(f"IP {ip_address} ban has expired. Removing from banned list.")
                 del banned_ips[ip_address]
-                logging.info(f"IP {ip_address} has been unbanned.")
+                save_banned_ips()  # Save updated banned IPs to file
 
         request_timestamps[ip_address].append(current_timestamp)
         
@@ -461,8 +477,12 @@ def index():
         if len(current_stack) == 100:
             traffic_df = pd.DataFrame(current_stack)
             result, confidence = analyze_traffic(traffic_df)
-            is_attack = "attack" in result.lower()
             
+            # If result from model is not BENIGN, mark as attack
+            is_attack = result != "BENIGN"
+            logging.info(f"Model prediction: result={result}, is_attack={is_attack}")
+            
+            # Additional checks for specific attack types (LOIC/HOIC)
             avg_flow_packetss = traffic_df['flow_packetss'].mean()
             avg_packet_length_std = traffic_df['packet_length_std'].mean()
             protocol = 6 if traffic_df['total_fwd_packets'].sum() >= traffic_df['total_length_of_bwd_packets'].sum() else 17
@@ -476,16 +496,19 @@ def index():
                 result = "LOIC UDP Flood"
                 confidence = 0.95
                 is_attack = True
+                logging.info(f"Detected LOIC UDP Flood: avg_flow_packetss={avg_flow_packetss}, avg_packet_length_std={avg_packet_length_std}, udp_port_consistency={udp_port_consistency}")
             elif protocol == 6 and http_request_rate > 50:
                 result = "HOIC HTTP Flood"
                 confidence = 0.95
                 is_attack = True
+                logging.info(f"Detected HOIC HTTP Flood: http_request_rate={http_request_rate}")
             
-            # Ban the IP if a DDoS attack is detected
+            # Ban the IP if an attack is detected
             if is_attack:
                 ban_duration = 3600  # 1 hour in seconds
                 banned_ips[ip_address] = current_timestamp + ban_duration
-                logging.info(f"IP {ip_address} has been banned for {ban_duration} seconds due to DDoS attack detection.")
+                save_banned_ips()  # Save updated banned IPs to file
+                logging.info(f"IP {ip_address} has been banned for {ban_duration} seconds due to attack detection (result={result}).")
 
             # Store in history only after analysis
             analysis_history.append({
