@@ -94,8 +94,8 @@ def check_npcap():
         logging.error(f"Npcap/WinPcap not detected: {e}")
         return False
 
-def get_active_interface():
-    """Get a valid network interface, with fallback to manual selection."""
+def get_active_interface(client_ip):
+    """Get a valid network interface, with special handling for localhost."""
     try:
         interfaces = get_working_ifaces()
         for iface in interfaces:
@@ -110,7 +110,15 @@ def get_active_interface():
         for iface in netifaces.interfaces():
             addrs = netifaces.ifaddresses(iface)
             if netifaces.AF_INET in addrs:
-                logging.info(f"Fallback selected interface: {iface}")
+                iface_ip = addrs[netifaces.AF_INET][0].get('addr', 'No IP')
+                logging.info(f"Fallback interface: {iface}, IP: {iface_ip}")
+                # If client_ip is localhost, prefer the loopback interface
+                if client_ip in ["127.0.0.1", "localhost"] and "loopback" in iface.lower():
+                    return iface
+                # Otherwise, prefer the interface matching the client_ip
+                if iface_ip == client_ip:
+                    return iface
+                # Default to the first interface with an IP
                 return iface
     except Exception as e:
         logging.error(f"Failed to get fallback interface: {e}")
@@ -126,16 +134,21 @@ def check_permissions():
 
 def packet_callback(packet):
     with capture_lock:
-        if (IP in packet) and (TCP in packet or UDP in packet):
+        if IP in packet:
             logging.debug(f"Captured packet: {packet.summary()}")
             captured_packets.append(packet)
 
 def capture_packets(interface, client_ip, duration=10):
     global captured_packets
     captured_packets = []
-    # Use a broader filter for debugging
-    filter_str = f"host {client_ip}" if client_ip and client_ip != "127.0.0.1" else "tcp or udp"
-    logging.info(f"Starting packet capture for {client_ip} on {interface} for {duration} seconds with filter: {filter_str}")
+    # Adjust filter to capture localhost traffic if needed
+    if client_ip in ["127.0.0.1", "localhost"]:
+        filter_str = "tcp or udp"
+        logging.info(f"Client IP is localhost, using broader filter: {filter_str}")
+    else:
+        filter_str = f"host {client_ip}"
+        logging.info(f"Starting packet capture for {client_ip} on {interface} for {duration} seconds with filter: {filter_str}")
+    
     try:
         sniff(iface=interface, prn=packet_callback, filter=filter_str, timeout=duration, store=False)
     except Exception as e:
@@ -317,6 +330,7 @@ def before_request():
     try:
         # Check if client IP is banned
         client_ip = request.remote_addr
+        logging.info(f"Raw client IP from request.remote_addr: {client_ip}")
         if client_ip in banned_ips:
             logging.warning(f"Blocked request from banned IP: {client_ip}")
             return jsonify({
@@ -331,14 +345,12 @@ def before_request():
             g.packets = []
             return
 
-        logging.info(f"Detected client IP: {client_ip}")
-
         # Fallback to local IP if client_ip is localhost
         if client_ip == "127.0.0.1":
             client_ip = get_local_ip()
             logging.info(f"Client IP is localhost, using local IP: {client_ip}")
 
-        interface = get_active_interface()
+        interface = get_active_interface(client_ip)
         
         # Run packet capture in a separate thread
         capture_thread = threading.Thread(target=capture_packets, args=(interface, client_ip, 10))
@@ -348,6 +360,7 @@ def before_request():
         # Store captured packets and client IP
         g.client_ip = client_ip
         g.packets = captured_packets
+        logging.info(f"Stored client IP: {g.client_ip}, Packets captured: {len(g.packets)}")
     except Exception as e:
         logging.error(f"Error in before_request: {e}")
         g.client_ip = None
@@ -360,6 +373,7 @@ def index():
         packets = getattr(g, 'packets', [])
         
         if not client_ip or not packets:
+            logging.error(f"Failed to proceed: client_ip={client_ip}, packets={len(packets)}")
             return jsonify({
                 'status': 'error',
                 'message': 'Failed to capture packets or identify client IP'
@@ -368,6 +382,7 @@ def index():
         # Extract features and predict
         features_df = extract_features(packets, client_ip)
         if features_df.empty:
+            logging.warning("No features extracted from packets")
             return jsonify({
                 'status': 'error',
                 'message': 'No features extracted from packets'
