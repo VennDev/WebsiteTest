@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from flask import Flask, request, jsonify, g
-from scapy.all import sniff, IP, TCP, UDP, get_working_ifaces, get_if_list
+from scapy.all import sniff, IP, TCP, UDP, get_working_ifaces, get_if_list, conf
 from tensorflow.keras.models import load_model
 import joblib
 import threading
@@ -12,6 +12,7 @@ from collections import defaultdict
 from datetime import datetime
 import os
 import netifaces
+import sys
 
 app = Flask(__name__)
 
@@ -83,6 +84,16 @@ def get_local_ip():
         logging.error(f"Failed to get local IP: {e}")
         return "127.0.0.1"
 
+def check_npcap():
+    """Check if Npcap/WinPcap is available for Scapy."""
+    try:
+        # Attempt to list interfaces using Scapy, which requires Npcap
+        conf.ifaces
+        return True
+    except Exception as e:
+        logging.error(f"Npcap/WinPcap not detected: {e}")
+        return False
+
 def get_active_interface():
     """Get a valid network interface, with fallback to manual selection."""
     try:
@@ -110,6 +121,7 @@ def check_permissions():
     """Check if the script has sufficient permissions for packet capture."""
     if os.name == 'posix' and os.geteuid() != 0:
         return False
+    # On Windows, we rely on the user running as Administrator
     return True
 
 def packet_callback(packet):
@@ -274,7 +286,7 @@ def extract_features(packets, client_ip):
             'idle_max': 0,
             'idle_min': 0,
             'simillarhttp': 0,
-            'inbound': 1 if src_ip == client_ip else 0,
+            'inbound': 1 if src W_ip == client_ip else 0,
             'label': 0
         }
         data.append(row)
@@ -295,6 +307,11 @@ def extract_features(packets, client_ip):
     logging.debug(f"Extracted features DataFrame:\n{df}")
     return df
 
+# Check for Npcap at startup
+if not check_npcap():
+    logging.error("Npcap is not installed or not properly configured. Please install Npcap from https://npcap.com/ and ensure it is in WinPcap API-compatible mode.")
+    sys.exit(1)
+
 @app.before_request
 def before_request():
     try:
@@ -309,7 +326,7 @@ def before_request():
 
         # Check permissions
         if not check_permissions():
-            logging.error("Insufficient permissions for packet capture. Run as root/admin.")
+            logging.error("Insufficient permissions for packet capture. Run as Administrator on Windows.")
             g.client_ip = None
             g.packets = []
             return
