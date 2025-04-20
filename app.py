@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from flask import Flask, request, jsonify, g
-from scapy.all import sniff, IP, TCP, UDP, get_working_ifaces, get_if_list, conf
+from scapy.all import sniff, IP, TCP, UDP, get_working_ifaces, get_if_list, conf, Raw
 from tensorflow.keras.models import load_model
 import joblib
 import threading
@@ -54,7 +54,8 @@ FEATURES = [
     'init_win_bytes_forward', 'init_win_bytes_backward', 'act_data_pkt_fwd',
     'min_seg_size_forward', 'active_mean', 'active_std', 'active_max',
     'active_min', 'idle_mean', 'idle_std', 'idle_max', 'idle_min',
-    'simillarhttp', 'inbound', 'label'
+    'simillarhttp', 'inbound', 'label', 'unique_source_ips', 'packet_rate',
+    'http_request_rate'  # New feature for HTTP flood detection
 ]
 
 DROP_COLS = [
@@ -89,7 +90,6 @@ def get_local_ip():
 def check_npcap():
     """Check if Npcap/WinPcap is available for Scapy."""
     try:
-        # Attempt to list interfaces using Scapy, which requires Npcap
         conf.ifaces
         return True
     except Exception as e:
@@ -107,20 +107,16 @@ def get_active_interface(client_ip):
     except Exception as e:
         logging.error(f"Failed to get working interfaces: {e}")
     
-    # Fallback: List all interfaces and select the first with an IP
     try:
         for iface in netifaces.interfaces():
             addrs = netifaces.ifaddresses(iface)
             if netifaces.AF_INET in addrs:
                 iface_ip = addrs[netifaces.AF_INET][0].get('addr', 'No IP')
                 logging.info(f"Fallback interface: {iface}, IP: {iface_ip}")
-                # If client_ip is localhost, prefer the loopback interface
                 if client_ip in ["127.0.0.1", "localhost"] and "loopback" in iface.lower():
                     return iface
-                # Otherwise, prefer the interface matching the client_ip
                 if iface_ip == client_ip:
                     return iface
-                # Default to the first interface with an IP
                 return iface
     except Exception as e:
         logging.error(f"Failed to get fallback interface: {e}")
@@ -131,19 +127,22 @@ def check_permissions():
     """Check if the script has sufficient permissions for packet capture."""
     if os.name == 'posix' and os.geteuid() != 0:
         return False
-    # On Windows, we rely on the user running as Administrator
     return True
 
 def packet_callback(packet):
     with capture_lock:
         if IP in packet:
-            logging.debug(f"Captured packet: {packet.summary()}")
+            # Check for HTTP traffic
+            if TCP in packet and packet[TCP].dport in [80, 5000]:  # Flask runs on 5000
+                if Raw in packet:
+                    payload = packet[Raw].load.decode(errors='ignore')
+                    if any(method in payload for method in ['GET', 'POST', 'HEAD']):
+                        logging.debug(f"HTTP packet detected: {payload.splitlines()[0]}")
             captured_packets.append(packet)
 
 def capture_packets(interface, client_ip, duration=30):
     global captured_packets
     captured_packets = []
-    # Adjust filter to capture localhost traffic if needed
     if client_ip in ["127.0.0.1", "localhost"]:
         filter_str = "tcp or udp"
         logging.info(f"Client IP is localhost, using broader filter: {filter_str}")
@@ -165,7 +164,7 @@ def extract_features(packets, client_ip):
     flows = defaultdict(lambda: {
         'timestamps': [], 'fwd_packets': [], 'bwd_packets': [],
         'fwd_lengths': [], 'bwd_lengths': [], 'flags': defaultdict(int),
-        'source_ips': set()
+        'source_ips': set(), 'http_requests': []
     })
     
     for pkt in packets:
@@ -183,6 +182,15 @@ def extract_features(packets, client_ip):
         flow['timestamps'].append(pkt.time)
         flow['source_ips'].add(src_ip)
         pkt_len = len(pkt)
+        
+        # Detect HTTP requests
+        is_http = False
+        if TCP in pkt and pkt[TCP].dport in [80, 5000]:  # Check Flask port
+            if Raw in pkt:
+                payload = pkt[Raw].load.decode(errors='ignore')
+                if any(method in payload for method in ['GET', 'POST', 'HEAD']):
+                    flow['http_requests'].append(pkt.time)
+                    is_http = True
         
         if src_ip == client_ip:
             flow['fwd_packets'].append(pkt)
@@ -217,9 +225,15 @@ def extract_features(packets, client_ip):
         
         iat = np.diff(timestamps) * 1e6 if len(timestamps) > 1 else [0]
         
-        # Add DDoS-specific features
-        packet_rate = total_packets / (flow_duration / 1e6) if flow_duration else 0  # Packets per second
-        unique_source_ips = len(flow['source_ips'])  # Number of unique source IPs
+        # DDoS-specific features
+        packet_rate = total_packets / (flow_duration / 1e6) if flow_duration else 0
+        unique_source_ips = len(flow['source_ips'])
+        
+        # HTTP-specific features
+        http_timestamps = sorted(flow['http_requests'])
+        http_request_count = len(http_timestamps)
+        http_request_rate = http_request_count / (flow_duration / 1e6) if flow_duration else 0
+        simillarhttp = 1 if http_request_count > 0 else 0
         
         row = {
             'unnamed_0': 0,
@@ -244,7 +258,7 @@ def extract_features(packets, client_ip):
             'bwd_packet_length_mean': np.mean(bwd_lengths) if bwd_lengths else 0,
             'bwd_packet_length_std': np.std(bwd_lengths) if bwd_lengths else 0,
             'flow_bytess': (sum(fwd_lengths) + sum(bwd_lengths)) / (flow_duration / 1e6) if flow_duration else 0,
-            'flow_packetss': packet_rate,  # Updated to use packet_rate
+            'flow_packetss': packet_rate,
             'flow_iat_mean': np.mean(iat) if len(iat) > 0 else 0,
             'flow_iat_std': np.std(iat) if len(iat) > 0 else 0,
             'flow_iat_max': max(iat) if len(iat) > 0 else 0,
@@ -307,12 +321,12 @@ def extract_features(packets, client_ip):
             'idle_std': 0,
             'idle_max': 0,
             'idle_min': 0,
-            'simillarhttp': 0,
+            'simillarhttp': simillarhttp,
             'inbound': 1 if src_ip == client_ip else 0,
             'label': 0,
-            # DDoS-specific features
             'unique_source_ips': unique_source_ips,
-            'packet_rate': packet_rate
+            'packet_rate': packet_rate,
+            'http_request_rate': http_request_rate
         }
         data.append(row)
 
@@ -321,7 +335,6 @@ def extract_features(packets, client_ip):
         logging.warning("Feature DataFrame is empty")
         return df
 
-    # Ensure all expected features are present
     for feature in FEATURES:
         if feature not in df.columns and feature != 'label':
             df[feature] = 0
@@ -345,7 +358,6 @@ if not check_npcap():
 @app.before_request
 def before_request():
     try:
-        # Check if client IP is banned
         client_ip = request.remote_addr
         logging.info(f"Raw client IP from request.remote_addr: {client_ip}")
         if client_ip in banned_ips:
@@ -355,26 +367,22 @@ def before_request():
                 'message': 'Your IP is temporarily banned due to suspicious activity'
             }), 403
 
-        # Check permissions
         if not check_permissions():
             logging.error("Insufficient permissions for packet capture. Run as Administrator on Windows.")
             g.client_ip = None
             g.packets = []
             return
 
-        # Fallback to local IP if client_ip is localhost
         if client_ip == "127.0.0.1":
             client_ip = get_local_ip()
             logging.info(f"Client IP is localhost, using local IP: {client_ip}")
 
         interface = get_active_interface(client_ip)
         
-        # Run packet capture in a separate thread
         capture_thread = threading.Thread(target=capture_packets, args=(interface, client_ip, 30))
         capture_thread.start()
-        capture_thread.join()  # Wait for capture to complete
+        capture_thread.join()
         
-        # Store captured packets and client IP
         g.client_ip = client_ip
         g.packets = captured_packets
         logging.info(f"Stored client IP: {g.client_ip}, Packets captured: {len(g.packets)}")
@@ -396,7 +404,6 @@ def index():
                 'message': 'Failed to capture packets or identify client IP'
             }), 200
 
-        # Extract features and predict
         features_df = extract_features(packets, client_ip)
         if features_df.empty:
             logging.warning("No features extracted from packets")
@@ -409,20 +416,25 @@ def index():
         predictions = model.predict(features_scaled)
         decoded_predictions = label_encoder.inverse_transform(predictions.argmax(axis=1))
         
-        # Log raw predictions and decoded labels for debugging
         logging.info(f"Raw predictions (probabilities):\n{predictions}")
         logging.info(f"Decoded predictions: {decoded_predictions}")
         
-        # Prepare results
         results = []
         for i, pred in enumerate(decoded_predictions):
             src_ip = socket.inet_ntoa(struct.pack('>I', int(features_df.iloc[i]['source_ip'])))
             results.append({'source_ip': src_ip, 'prediction': pred})
         
-        # Check if any prediction indicates an attack or DDoS
-        is_attack = any(pred.lower() in ['attack', 'malicious', 'intrusion', 'ddos'] for pred in decoded_predictions)
+        # Check for attack (including HTTP flood)
+        is_attack = any(pred.lower() in ['attack', 'malicious', 'intrusion', 'ddos', 'http_flood'] for pred in decoded_predictions)
         
-        # Handle attack detection
+        # Rule-based HTTP flood detection
+        http_request_rate = features_df['http_request_rate'].iloc[0] if 'http_request_rate' in features_df else 0
+        unique_source_ips = features_df['unique_source_ips'].iloc[0] if 'unique_source_ips' in features_df else 1
+        rule_based_http_flood = http_request_rate > 100 or (http_request_rate > 50 and unique_source_ips > 5)  # Adjust thresholds
+        logging.info(f"Rule-based HTTP flood check: http_request_rate={http_request_rate}, unique_source_ips={unique_source_ips}, detected={rule_based_http_flood}")
+        
+        is_attack = is_attack or rule_based_http_flood
+        
         if is_attack:
             logging.warning(f"!!! Potential cyberattack detected from IP: {client_ip} !!!")
             banned_ips.add(client_ip)
@@ -444,7 +456,6 @@ def index():
 
 @app.route('/debug_interfaces', methods=['GET'])
 def debug_interfaces():
-    """Debug endpoint to list available network interfaces."""
     try:
         interfaces = netifaces.interfaces()
         iface_details = []
@@ -465,7 +476,6 @@ def debug_interfaces():
 
 @app.route('/banned_ips', methods=['GET'])
 def get_banned_ips():
-    """Debug endpoint to list temporarily banned IPs."""
     try:
         return jsonify({
             'status': 'success',
