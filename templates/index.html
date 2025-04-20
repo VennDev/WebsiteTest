@@ -1,255 +1,84 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Network Traffic Analyzer</title>
+    <title>Network Traffic Analysis</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        .spinner {
-            display: none;
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #3498db;
-            border-radius: 50%;
-            width: 24px;
-            height: 24px;
-            animation: spin 1s linear infinite;
-            margin-left: 10px;
-        }
-
-        @keyframes spin {
-            0% {
-                transform: rotate(0deg);
-            }
-
-            100% {
-                transform: rotate(360deg);
-            }
-        }
-    </style>
 </head>
-
-<body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
-    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-3xl">
-        <h1 class="text-3xl font-bold mb-6 text-center text-gray-800">Network Traffic Analyzer</h1>
-
-        <div class="mb-6">
-            <p class="text-gray-600 mb-4 text-center">Analyze real-time network traffic for anomalies using a deep
-                learning model.</p>
-
-            <!-- Client IP Display -->
-            <div class="mb-4">
-                <p class="text-sm font-medium text-gray-700">Detected Client IP: <span id="clientIp"
-                        class="font-semibold text-gray-900">Loading...</span></p>
-            </div>
-
-            <!-- Start Capture Button -->
-            <div class="flex items-center justify-center">
-                <button id="startCapture"
-                    class="bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed">
-                    Start Packet Capture
-                </button>
-                <div id="captureSpinner" class="spinner"></div>
-            </div>
-            <p id="captureStatus" class="text-center text-gray-600 mt-2"></p>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+        <h1 class="text-2xl font-bold text-center mb-6">Network Traffic Analysis</h1>
+        <div id="loading" class="text-center text-gray-600">
+            <p>Analyzing your network traffic...</p>
+            <div class="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto mt-4"></div>
         </div>
-
-        <!-- Predict Button -->
-        <div class="mb-6 flex justify-center">
-            <button id="predictButton"
-                class="bg-green-500 text-white py-2 px-4 rounded hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed"
-                disabled>
-                Analyze Traffic
-            </button>
-            <div id="predictSpinner" class="spinner"></div>
-        </div>
-
-        <!-- Results Section -->
-        <div id="results" class="mt-6 hidden">
-            <h2 class="text-lg font-semibold mb-2 text-gray-700">Prediction Results</h2>
-            <div id="resultsTable" class="bg-gray-50 p-4 rounded border">
-                <table class="w-full text-left">
-                    <thead>
-                        <tr class="bg-gray-200">
-                            <th class="p-2">Source IP</th>
-                            <th class="p-2">Prediction</th>
-                        </tr>
-                    </thead>
-                    <tbody id="resultsBody"></tbody>
-                </table>
+        <div id="result" class="hidden">
+            <p class="text-lg font-semibold">Client IP: <span id="client-ip" class="text-blue-600"></span></p>
+            <p class="text-lg font-semibold mt-2">Attack Detected: <span id="is-attack" class="font-bold"></span></p>
+            <div class="mt-4">
+                <h2 class="text-xl font-semibold">Predictions:</h2>
+                <ul id="predictions" class="list-disc pl-5 mt-2"></ul>
             </div>
+            <p id="error" class="text-red-600 mt-4 hidden"></p>
         </div>
+        <button id="retry" class="mt-6 w-full bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600 hidden">Retry Analysis</button>
     </div>
 
     <script>
-        const startCaptureBtn = document.getElementById('startCapture');
-        const predictBtn = document.getElementById('predictButton');
-        const clientIpSpan = document.getElementById('clientIp');
-        const captureStatus = document.getElementById('captureStatus');
-        const captureSpinner = document.getElementById('captureSpinner');
-        const predictSpinner = document.getElementById('predictSpinner');
-        const resultsSection = document.getElementById('results');
-        const resultsBody = document.getElementById('resultsBody');
+        async function analyzeTraffic() {
+            // Show loading, hide results
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('result').classList.add('hidden');
+            document.getElementById('retry').classList.add('hidden');
+            document.getElementById('error').classList.add('hidden');
 
-        let clientIp = null;
-
-        // Fetch client IP on page load
-        async function fetchClientIp() {
             try {
-                const response = await fetch('/get_client_ip', {
-                    method: 'GET'
+                const response = await fetch('http://localhost:5000/', {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json' }
                 });
-                const text = await response.text();
-                console.log('Raw get_client_ip response:', text);
+                const data = await response.json();
 
-                let data;
-                try {
-                    data = JSON.parse(text);
-                } catch (e) {
-                    throw new Error(`Invalid JSON response: ${text}`);
-                }
+                // Hide loading
+                document.getElementById('loading').classList.add('hidden');
 
-                if (response.ok && data.status === 'success') {
-                    clientIp = data.client_ip;
-                    clientIpSpan.textContent = clientIp;
-                    clientIpSpan.classList.add('text-green-600');
-                    startCaptureBtn.disabled = false;
+                if (data.status === 'success') {
+                    // Display results
+                    document.getElementById('result').classList.remove('hidden');
+                    document.getElementById('client-ip').textContent = data.client_ip;
+                    document.getElementById('is-attack').textContent = data.is_attack ? 'Yes' : 'No';
+                    document.getElementById('is-attack').className = data.is_attack ? 'text-red-600' : 'text-green-600';
+
+                    const predictionsList = document.getElementById('predictions');
+                    predictionsList.innerHTML = '';
+                    data.predictions.forEach(pred => {
+                        const li = document.createElement('li');
+                        li.textContent = `Source IP: ${pred.source_ip}, Prediction: ${pred.prediction}`;
+                        predictionsList.appendChild(li);
+                    });
+
+                    document.getElementById('retry').classList.remove('hidden');
                 } else {
-                    throw new Error(data.message || 'Failed to fetch client IP');
+                    // Display error
+                    document.getElementById('error').textContent = data.message || 'An error occurred';
+                    document.getElementById('error').classList.remove('hidden');
+                    document.getElementById('retry').classList.remove('hidden');
                 }
             } catch (error) {
-                clientIpSpan.textContent = 'Error fetching IP';
-                clientIpSpan.classList.add('text-red-500');
-                captureStatus.textContent = `Error: ${error.message}`;
-                captureStatus.classList.add('text-red-500');
-                startCaptureBtn.disabled = true;
+                // Handle network or other errors
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('error').textContent = `Error: ${error.message}`;
+                document.getElementById('error').classList.remove('hidden');
+                document.getElementById('retry').classList.remove('hidden');
             }
         }
 
-        // Call fetchClientIp on page load
-        fetchClientIp();
+        // Run analysis on page load
+        document.addEventListener('DOMContentLoaded', analyzeTraffic);
 
-        // Start packet capture
-        startCaptureBtn.addEventListener('click', async () => {
-            if (!clientIp) {
-                captureStatus.textContent = 'Client IP not available';
-                captureStatus.classList.add('text-red-500');
-                return;
-            }
-
-            startCaptureBtn.disabled = true;
-            startCaptureBtn.textContent = 'Capturing...';
-            captureSpinner.style.display = 'inline-block';
-            captureStatus.textContent = 'Capturing packets for 20 seconds...';
-            captureStatus.classList.remove('text-red-500');
-
-            try {
-                const response = await fetch('/start_capture', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ client_ip: clientIp })
-                });
-
-                const text = await response.text();
-                console.log('Raw start_capture response:', text);
-
-                let data;
-                try {
-                    data = JSON.parse(text);
-                } catch (e) {
-                    throw new Error(`Invalid JSON response: ${text}`);
-                }
-
-                if (response.ok && data.status === 'success') {
-                    captureStatus.textContent = data.message;
-                    captureStatus.classList.add('text-green-500');
-                    predictBtn.disabled = false;
-                } else {
-                    throw new Error(data.message || 'Capture failed');
-                }
-            } catch (error) {
-                captureStatus.textContent = `Error: ${error.message}`;
-                captureStatus.classList.add('text-red-500');
-            } finally {
-                startCaptureBtn.disabled = false;
-                startCaptureBtn.textContent = 'Start Packet Capture';
-                captureSpinner.style.display = 'none';
-            }
-        });
-
-        // Trigger prediction
-        predictBtn.addEventListener('click', async () => {
-            if (!clientIp) {
-                captureStatus.textContent = 'Client IP not available';
-                captureStatus.classList.add('text-red-500');
-                return;
-            }
-
-            predictBtn.disabled = true;
-            predictBtn.textContent = 'Analyzing...';
-            predictSpinner.style.display = 'inline-block';
-            captureStatus.textContent = 'Processing traffic data...';
-            captureStatus.classList.remove('text-red-500', 'text-green-500');
-
-            try {
-                const response = await fetch('/predict', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ client_ip: clientIp })
-                });
-
-                const text = await response.text();
-                console.log('Raw predict response:', text);
-
-                let data;
-                try {
-                    data = JSON.parse(text);
-                } catch (e) {
-                    throw new Error(`Invalid JSON response: ${text}`);
-                }
-
-                if (response.ok && data.status === 'success') {
-                    displayResults(data.predictions);
-                    captureStatus.textContent = 'Analysis complete!';
-                    captureStatus.classList.add('text-green-500');
-                } else {
-                    throw new Error(data.message || 'Prediction failed');
-                }
-            } catch (error) {
-                captureStatus.textContent = `Error: ${error.message}`;
-                captureStatus.classList.add('text-red-500');
-            } finally {
-                predictBtn.disabled = false;
-                predictBtn.textContent = 'Analyze Traffic';
-                predictSpinner.style.display = 'none';
-            }
-        });
-
-        // Display prediction results
-        function displayResults(predictions) {
-            resultsSection.classList.remove('hidden');
-            resultsBody.innerHTML = '';
-
-            if (!predictions || predictions.length === 0) {
-                resultsBody.innerHTML = '<tr><td colspan="2" class="p-2 text-center text-gray-500">No predictions available</td></tr>';
-                return;
-            }
-
-            predictions.forEach(pred => {
-                const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td class="p-2">${pred.source_ip}</td>
-                    <td class="p-2">${pred.prediction}</td>
-                `;
-                resultsBody.appendChild(row);
-            });
-        }
+        // Retry button event listener
+        document.getElementById('retry').addEventListener('click', analyzeTraffic);
     </script>
 </body>
-
 </html>
