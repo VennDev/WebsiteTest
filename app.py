@@ -59,9 +59,10 @@ DROP_COLS = [
     'source_port', 'destination_port', 'timestamp', 'protocol'
 ]
 
-# Global variables for packet capture
+# Global variables for packet capture and banned IPs
 captured_packets = []
 capture_lock = threading.Lock()
+banned_ips = set()  # Temporary in-memory storage for banned IPs
 
 def ip_to_int(ip):
     try:
@@ -297,6 +298,15 @@ def extract_features(packets, client_ip):
 @app.before_request
 def before_request():
     try:
+        # Check if client IP is banned
+        client_ip = request.remote_addr
+        if client_ip in banned_ips:
+            logging.warning(f"Blocked request from banned IP: {client_ip}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Your IP is temporarily banned due to suspicious activity'
+            }), 403
+
         # Check permissions
         if not check_permissions():
             logging.error("Insufficient permissions for packet capture. Run as root/admin.")
@@ -304,7 +314,6 @@ def before_request():
             g.packets = []
             return
 
-        client_ip = request.remote_addr
         logging.info(f"Detected client IP: {client_ip}")
 
         # Fallback to local IP if client_ip is localhost
@@ -360,6 +369,12 @@ def index():
         # Check if any prediction indicates an attack
         is_attack = any(pred.lower() in ['attack', 'malicious', 'intrusion'] for pred in decoded_predictions)
         
+        # Handle attack detection
+        if is_attack:
+            logging.warning(f"!!! Potential cyberattack detected from IP: {client_ip} !!!")
+            banned_ips.add(client_ip)
+            logging.info(f"Temporarily banned IP: {client_ip}")
+
         return jsonify({
             'status': 'success',
             'client_ip': client_ip,
@@ -390,6 +405,21 @@ def debug_interfaces():
         }), 200
     except Exception as e:
         logging.error(f"Debug interfaces error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }), 500
+
+@app.route('/banned_ips', methods=['GET'])
+def get_banned_ips():
+    """Debug endpoint to list temporarily banned IPs."""
+    try:
+        return jsonify({
+            'status': 'success',
+            'banned_ips': list(banned_ips)
+        }), 200
+    except Exception as e:
+        logging.error(f"Banned IPs endpoint error: {e}")
         return jsonify({
             'status': 'error',
             'message': f'Error: {str(e)}'
