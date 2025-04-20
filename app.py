@@ -24,7 +24,7 @@ except Exception as e:
     raise
 
 # Define features and columns to drop
-# Updated FEATURES to match the model's training columns, including attack_type
+# Updated FEATURES to match the model's training columns, excluding simillarhttp
 FEATURES = [
     'unnamed_0', 'flow_id', 'source_ip', 'source_port', 'destination_ip', 'destination_port',
     'protocol', 'timestamp', 'flow_duration', 'total_fwd_packets', 'total_backward_packets',
@@ -48,7 +48,7 @@ FEATURES = [
     'init_win_bytes_forward', 'init_win_bytes_backward', 'act_data_pkt_fwd',
     'min_seg_size_forward', 'active_mean', 'active_std', 'active_max',
     'active_min', 'idle_mean', 'idle_std', 'idle_max', 'idle_min',
-    'simillarhttp', 'inbound', 'label', 'attack_type'
+    'inbound', 'label', 'attack_type'
 ]
 
 DROP_COLS = [
@@ -213,7 +213,6 @@ def index():
             'idle_std': 0,
             'idle_max': 0,
             'idle_min': 0,
-            'simillarhttp': 1 if 'http' in user_agent.lower() else 0,
             'inbound': 1
         }
         
