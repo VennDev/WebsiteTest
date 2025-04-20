@@ -132,15 +132,6 @@ def calculate_request_rate(ip_address):
     request_timestamps[ip_address] = [t for t in request_timestamps[ip_address] if current_time - t < 60]
     return len(request_timestamps[ip_address]) / 60.0
 
-def check_time_interval(ip_address, current_time):
-    """Check if the time interval between requests is between 0.1 and 1.5 seconds"""
-    timestamps = request_timestamps[ip_address]
-    if len(timestamps) < 2:
-        return True
-    last_time = timestamps[-2]
-    interval = current_time - last_time
-    return 0.1 <= interval <= 1.5
-
 def packet_callback(packet):
     """Callback function to process captured packets"""
     if IP in packet:
@@ -345,123 +336,119 @@ def index():
         
         request_timestamps[ip_address].append(current_timestamp)
         
-        if not check_time_interval(ip_address, current_timestamp):
-            result, confidence = "Interval outside range (0.1-1.5s)", 0.0
-            is_attack = False
-        else:
-            http_request_rate = calculate_request_rate(ip_address)
-            content_length = int(request.headers.get('Content-Length', 0))
-            user_agent = request.headers.get('User-Agent', '')
-            network_features = process_network_data() or {}
+        http_request_rate = calculate_request_rate(ip_address)
+        content_length = int(request.headers.get('Content-Length', 0))
+        user_agent = request.headers.get('User-Agent', '')
+        network_features = process_network_data() or {}
 
-            traffic_data = {
-                'flow_duration': network_features.get('flow_duration', 1000),
-                'total_fwd_packets': network_features.get('total_fwd_packets', 1),
-                'total_backward_packets': network_features.get('total_backward_packets', 1),
-                'total_length_of_fwd_packets': network_features.get('total_length_of_fwd_packets', content_length),
-                'total_length_of_bwd_packets': network_features.get('total_length_of_bwd_packets', 0),
-                'fwd_packet_length_max': network_features.get('fwd_packet_length_max', content_length),
-                'fwd_packet_length_min': network_features.get('fwd_packet_length_min', content_length),
-                'fwd_packet_length_mean': network_features.get('fwd_packet_length_mean', content_length),
-                'fwd_packet_length_std': network_features.get('fwd_packet_length_std', 0),
-                'bwd_packet_length_max': network_features.get('bwd_packet_length_max', 0),
-                'bwd_packet_length_min': network_features.get('bwd_packet_length_min', 0),
-                'bwd_packet_length_mean': network_features.get('bwd_packet_length_mean', 0),
-                'bwd_packet_length_std': network_features.get('bwd_packet_length_std', 0),
-                'flow_bytess': network_features.get('flow_bytess', 0),
-                'flow_packetss': network_features.get('flow_packetss', 0),
-                'flow_iat_mean': network_features.get('flow_iat_mean', 0),
-                'flow_iat_std': network_features.get('flow_iat_std', 0),
-                'flow_iat_max': network_features.get('flow_iat_max', 0),
-                'flow_iat_min': network_features.get('flow_iat_min', 0),
-                'fwd_iat_total': network_features.get('fwd_iat_total', 0),
-                'fwd_iat_mean': network_features.get('fwd_iat_mean', 0),
-                'fwd_iat_std': network_features.get('fwd_iat_std', 0),
-                'fwd_iat_max': network_features.get('fwd_iat_max', 0),
-                'fwd_iat_min': network_features.get('fwd_iat_min', 0),
-                'bwd_iat_total': network_features.get('bwd_iat_total', 0),
-                'bwd_iat_mean': network_features.get('bwd_iat_mean', 0),
-                'bwd_iat_std': network_features.get('bwd_iat_std', 0),
-                'bwd_iat_max': network_features.get('bwd_iat_max', 0),
-                'bwd_iat_min': network_features.get('bwd_iat_min', 0),
-                'fwd_psh_flags': network_features.get('fwd_psh_flags', 0),
-                'bwd_psh_flags': network_features.get('bwd_psh_flags', 0),
-                'fwd_urg_flags': network_features.get('fwd_urg_flags', 0),
-                'bwd_urg_flags': network_features.get('bwd_urg_flags', 0),
-                'fwd_header_length': network_features.get('fwd_header_length', 0),
-                'bwd_header_length': network_features.get('bwd_header_length', 0),
-                'fwd_packetss': network_features.get('fwd_packetss', 0),
-                'bwd_packetss': network_features.get('bwd_packetss', 0),
-                'min_packet_length': network_features.get('min_packet_length', content_length),
-                'max_packet_length': network_features.get('max_packet_length', content_length),
-                'packet_length_mean': network_features.get('packet_length_mean', content_length),
-                'packet_length_std': network_features.get('packet_length_std', 0),
-                'packet_length_variance': network_features.get('packet_length_variance', 0),
-                'fin_flag_count': network_features.get('fin_flag_count', 0),
-                'syn_flag_count': network_features.get('syn_flag_count', 0),
-                'rst_flag_count': network_features.get('rst_flag_count', 0),
-                'psh_flag_count': network_features.get('psh_flag_count', 0),
-                'ack_flag_count': network_features.get('ack_flag_count', 0),
-                'urg_flag_count': network_features.get('urg_flag_count', 0),
-                'cwe_flag_count': network_features.get('cwe_flag_count', 0),
-                'ece_flag_count': network_features.get('ece_flag_count', 0),
-                'downup_ratio': network_features.get('downup_ratio', 0),
-                'average_packet_size': network_features.get('average_packet_size', content_length),
-                'avg_fwd_segment_size': network_features.get('avg_fwd_segment_size', content_length),
-                'avg_bwd_segment_size': network_features.get('avg_bwd_segment_size', 0),
-                'fwd_header_length1': network_features.get('fwd_header_length', 0),
-                'fwd_avg_bytesbulk': 0,
-                'fwd_avg_packetsbulk': 0,
-                'fwd_avg_bulk_rate': 0,
-                'bwd_avg_bytesbulk': 0,
-                'bwd_avg_packetsbulk': 0,
-                'bwd_avg_bulk_rate': 0,
-                'subflow_fwd_packets': network_features.get('total_fwd_packets', 1),
-                'subflow_fwd_bytes': network_features.get('total_length_of_fwd_packets', content_length),
-                'subflow_bwd_packets': network_features.get('total_backward_packets', 1),
-                'subflow_bwd_bytes': network_features.get('total_length_of_bwd_packets', 0),
-                'init_win_bytes_forward': network_features.get('init_win_bytes_forward', 0),
-                'init_win_bytes_backward': network_features.get('init_win_bytes_backward', 0),
-                'act_data_pkt_fwd': network_features.get('total_fwd_packets', 1),
-                'min_seg_size_forward': network_features.get('min_seg_size_forward', 0),
-                'active_mean': 0,
-                'active_std': 0,
-                'active_max': 0,
-                'active_min': 0,
-                'idle_mean': 0,
-                'idle_std': 0,
-                'idle_max': 0,
-                'idle_min': 0,
-                'inbound': network_features.get('inbound', 1)
-            }
-            
-            current_stack = traffic_samples_by_ip[ip_address][current_stack_index[ip_address]]
-            current_stack.append(traffic_data)
-            
-            if len(current_stack) > 50:
-                current_stack.pop(0)
-            
-            result, confidence = "Waiting for more data", 0.0
-            is_attack = False
-            if len(current_stack) == 50:
-                traffic_df = pd.DataFrame(current_stack)
-                result, confidence = analyze_traffic(traffic_df)
-                is_attack = "attack" in result.lower()
-                
-                avg_flow_packetss = traffic_df['flow_packetss'].mean()
-                protocol = 6 if traffic_df['total_fwd_packets'].sum() >= traffic_df['total_length_of_bwd_packets'].sum() else 17
-                if protocol == 17 and avg_flow_packetss > 100:
-                    result = "LOIC UDP Flood"
-                    confidence = 0.95
-                    is_attack = True
-                elif protocol == 6 and http_request_rate > 50:
-                    result = "HOIC HTTP Flood"
-                    confidence = 0.95
-                    is_attack = True
-                
-                traffic_samples_by_ip[ip_address][current_stack_index[ip_address]] = []
-                current_stack_index[ip_address] = (current_stack_index[ip_address] + 1) % 50
+        traffic_data = {
+            'flow_duration': network_features.get('flow_duration', 1000),
+            'total_fwd_packets': network_features.get('total_fwd_packets', 1),
+            'total_backward_packets': network_features.get('total_backward_packets', 1),
+            'total_length_of_fwd_packets': network_features.get('total_length_of_fwd_packets', content_length),
+            'total_length_of_bwd_packets': network_features.get('total_length_of_bwd_packets', 0),
+            'fwd_packet_length_max': network_features.get('fwd_packet_length_max', content_length),
+            'fwd_packet_length_min': network_features.get('fwd_packet_length_min', content_length),
+            'fwd_packet_length_mean': network_features.get('fwd_packet_length_mean', content_length),
+            'fwd_packet_length_std': network_features.get('fwd_packet_length_std', 0),
+            'bwd_packet_length_max': network_features.get('bwd_packet_length_max', 0),
+            'bwd_packet_length_min': network_features.get('bwd_packet_length_min', 0),
+            'bwd_packet_length_mean': network_features.get('bwd_packet_length_mean', 0),
+            'bwd_packet_length_std': network_features.get('bwd_packet_length_std', 0),
+            'flow_bytess': network_features.get('flow_bytess', 0),
+            'flow_packetss': network_features.get('flow_packetss', 0),
+            'flow_iat_mean': network_features.get('flow_iat_mean', 0),
+            'flow_iat_std': network_features.get('flow_iat_std', 0),
+            'flow_iat_max': network_features.get('flow_iat_max', 0),
+            'flow_iat_min': network_features.get('flow_iat_min', 0),
+            'fwd_iat_total': network_features.get('fwd_iat_total', 0),
+            'fwd_iat_mean': network_features.get('fwd_iat_mean', 0),
+            'fwd_iat_std': network_features.get('fwd_iat_std', 0),
+            'fwd_iat_max': network_features.get('fwd_iat_max', 0),
+            'fwd_iat_min': network_features.get('fwd_iat_min', 0),
+            'bwd_iat_total': network_features.get('bwd_iat_total', 0),
+            'bwd_iat_mean': network_features.get('bwd_iat_mean', 0),
+            'bwd_iat_std': network_features.get('bwd_iat_std', 0),
+            'bwd_iat_max': network_features.get('bwd_iat_max', 0),
+            'bwd_iat_min': network_features.get('bwd_iat_min', 0),
+            'fwd_psh_flags': network_features.get('fwd_psh_flags', 0),
+            'bwd_psh_flags': network_features.get('bwd_psh_flags', 0),
+            'fwd_urg_flags': network_features.get('fwd_urg_flags', 0),
+            'bwd_urg_flags': network_features.get('bwd_urg_flags', 0),
+            'fwd_header_length': network_features.get('fwd_header_length', 0),
+            'bwd_header_length': network_features.get('bwd_header_length', 0),
+            'fwd_packetss': network_features.get('fwd_packetss', 0),
+            'bwd_packetss': network_features.get('bwd_packetss', 0),
+            'min_packet_length': network_features.get('min_packet_length', content_length),
+            'max_packet_length': network_features.get('max_packet_length', content_length),
+            'packet_length_mean': network_features.get('packet_length_mean', content_length),
+            'packet_length_std': network_features.get('packet_length_std', 0),
+            'packet_length_variance': network_features.get('packet_length_variance', 0),
+            'fin_flag_count': network_features.get('fin_flag_count', 0),
+            'syn_flag_count': network_features.get('syn_flag_count', 0),
+            'rst_flag_count': network_features.get('rst_flag_count', 0),
+            'psh_flag_count': network_features.get('psh_flag_count', 0),
+            'ack_flag_count': network_features.get('ack_flag_count', 0),
+            'urg_flag_count': network_features.get('urg_flag_count', 0),
+            'cwe_flag_count': network_features.get('cwe_flag_count', 0),
+            'ece_flag_count': network_features.get('ece_flag_count', 0),
+            'downup_ratio': network_features.get('downup_ratio', 0),
+            'average_packet_size': network_features.get('average_packet_size', content_length),
+            'avg_fwd_segment_size': network_features.get('avg_fwd_segment_size', content_length),
+            'avg_bwd_segment_size': network_features.get('avg_bwd_segment_size', 0),
+            'fwd_header_length1': network_features.get('fwd_header_length', 0),
+            'fwd_avg_bytesbulk': 0,
+            'fwd_avg_packetsbulk': 0,
+            'fwd_avg_bulk_rate': 0,
+            'bwd_avg_bytesbulk': 0,
+            'bwd_avg_packetsbulk': 0,
+            'bwd_avg_bulk_rate': 0,
+            'subflow_fwd_packets': network_features.get('total_fwd_packets', 1),
+            'subflow_fwd_bytes': network_features.get('total_length_of_fwd_packets', content_length),
+            'subflow_bwd_packets': network_features.get('total_backward_packets', 1),
+            'subflow_bwd_bytes': network_features.get('total_length_of_bwd_packets', 0),
+            'init_win_bytes_forward': network_features.get('init_win_bytes_forward', 0),
+            'init_win_bytes_backward': network_features.get('init_win_bytes_backward', 0),
+            'act_data_pkt_fwd': network_features.get('total_fwd_packets', 1),
+            'min_seg_size_forward': network_features.get('min_seg_size_forward', 0),
+            'active_mean': 0,
+            'active_std': 0,
+            'active_max': 0,
+            'active_min': 0,
+            'idle_mean': 0,
+            'idle_std': 0,
+            'idle_max': 0,
+            'idle_min': 0,
+            'inbound': network_features.get('inbound', 1)
+        }
         
+        current_stack = traffic_samples_by_ip[ip_address][current_stack_index[ip_address]]
+        current_stack.append(traffic_data)
+        
+        if len(current_stack) > 50:
+            current_stack.pop(0)
+        
+        result, confidence = "Waiting for more data", 0.0
+        is_attack = False
+        if len(current_stack) == 50:
+            traffic_df = pd.DataFrame(current_stack)
+            result, confidence = analyze_traffic(traffic_df)
+            is_attack = "attack" in result.lower()
+            
+            avg_flow_packetss = traffic_df['flow_packetss'].mean()
+            protocol = 6 if traffic_df['total_fwd_packets'].sum() >= traffic_df['total_length_of_bwd_packets'].sum() else 17
+            if protocol == 17 and avg_flow_packetss > 100:
+                result = "LOIC UDP Flood"
+                confidence = 0.95
+                is_attack = True
+            elif protocol == 6 and http_request_rate > 50:
+                result = "HOIC HTTP Flood"
+                confidence = 0.95
+                is_attack = True
+            
+            traffic_samples_by_ip[ip_address][current_stack_index[ip_address]] = []
+            current_stack_index[ip_address] = (current_stack_index[ip_address] + 1) % 50
+    
         analysis_history.append({
             'ip_address': ip_address,
             'timestamp': current_time.strftime('%Y-%m-%d %H:%M:%S'),
