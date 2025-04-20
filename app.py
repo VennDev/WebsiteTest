@@ -286,7 +286,7 @@ def extract_features(packets, client_ip):
             'idle_max': 0,
             'idle_min': 0,
             'simillarhttp': 0,
-            'inbound': 1 if src W_ip == client_ip else 0,
+            'inbound': 1 if src_ip == client_ip else 0,
             'label': 0
         }
         data.append(row)
