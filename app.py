@@ -24,6 +24,8 @@ try:
     model = load_model('model.keras')
     scaler = joblib.load('scaler.pkl')
     label_encoder = joblib.load('label_encoder.pkl')
+    # Log the possible labels from the label encoder
+    logging.info(f"Label encoder classes: {label_encoder.classes_}")
 except Exception as e:
     logging.error(f"Failed to load model or preprocessors: {e}")
     raise
@@ -138,7 +140,7 @@ def packet_callback(packet):
             logging.debug(f"Captured packet: {packet.summary()}")
             captured_packets.append(packet)
 
-def capture_packets(interface, client_ip, duration=10):
+def capture_packets(interface, client_ip, duration=30):
     global captured_packets
     captured_packets = []
     # Adjust filter to capture localhost traffic if needed
@@ -162,7 +164,8 @@ def extract_features(packets, client_ip):
 
     flows = defaultdict(lambda: {
         'timestamps': [], 'fwd_packets': [], 'bwd_packets': [],
-        'fwd_lengths': [], 'bwd_lengths': [], 'flags': defaultdict(int)
+        'fwd_lengths': [], 'bwd_lengths': [], 'flags': defaultdict(int),
+        'source_ips': set()
     })
     
     for pkt in packets:
@@ -178,6 +181,7 @@ def extract_features(packets, client_ip):
         
         flow = flows[flow_key]
         flow['timestamps'].append(pkt.time)
+        flow['source_ips'].add(src_ip)
         pkt_len = len(pkt)
         
         if src_ip == client_ip:
@@ -209,8 +213,13 @@ def extract_features(packets, client_ip):
         bwd_lengths = flow['bwd_lengths']
         total_fwd_packets = len(flow['fwd_packets'])
         total_bwd_packets = len(flow['bwd_packets'])
+        total_packets = total_fwd_packets + total_bwd_packets
         
         iat = np.diff(timestamps) * 1e6 if len(timestamps) > 1 else [0]
+        
+        # Add DDoS-specific features
+        packet_rate = total_packets / (flow_duration / 1e6) if flow_duration else 0  # Packets per second
+        unique_source_ips = len(flow['source_ips'])  # Number of unique source IPs
         
         row = {
             'unnamed_0': 0,
@@ -235,7 +244,7 @@ def extract_features(packets, client_ip):
             'bwd_packet_length_mean': np.mean(bwd_lengths) if bwd_lengths else 0,
             'bwd_packet_length_std': np.std(bwd_lengths) if bwd_lengths else 0,
             'flow_bytess': (sum(fwd_lengths) + sum(bwd_lengths)) / (flow_duration / 1e6) if flow_duration else 0,
-            'flow_packetss': (total_fwd_packets + total_bwd_packets) / (flow_duration / 1e6) if flow_duration else 0,
+            'flow_packetss': packet_rate,  # Updated to use packet_rate
             'flow_iat_mean': np.mean(iat) if len(iat) > 0 else 0,
             'flow_iat_std': np.std(iat) if len(iat) > 0 else 0,
             'flow_iat_max': max(iat) if len(iat) > 0 else 0,
@@ -300,7 +309,10 @@ def extract_features(packets, client_ip):
             'idle_min': 0,
             'simillarhttp': 0,
             'inbound': 1 if src_ip == client_ip else 0,
-            'label': 0
+            'label': 0,
+            # DDoS-specific features
+            'unique_source_ips': unique_source_ips,
+            'packet_rate': packet_rate
         }
         data.append(row)
 
@@ -309,6 +321,11 @@ def extract_features(packets, client_ip):
         logging.warning("Feature DataFrame is empty")
         return df
 
+    # Ensure all expected features are present
+    for feature in FEATURES:
+        if feature not in df.columns and feature != 'label':
+            df[feature] = 0
+    
     df = df.drop(columns=[col for col in DROP_COLS if col in df.columns], errors='ignore')
     df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_').str.replace(r'[^\w]', '', regex=True)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -353,7 +370,7 @@ def before_request():
         interface = get_active_interface(client_ip)
         
         # Run packet capture in a separate thread
-        capture_thread = threading.Thread(target=capture_packets, args=(interface, client_ip, 10))
+        capture_thread = threading.Thread(target=capture_packets, args=(interface, client_ip, 30))
         capture_thread.start()
         capture_thread.join()  # Wait for capture to complete
         
@@ -392,14 +409,18 @@ def index():
         predictions = model.predict(features_scaled)
         decoded_predictions = label_encoder.inverse_transform(predictions.argmax(axis=1))
         
+        # Log raw predictions and decoded labels for debugging
+        logging.info(f"Raw predictions (probabilities):\n{predictions}")
+        logging.info(f"Decoded predictions: {decoded_predictions}")
+        
         # Prepare results
         results = []
         for i, pred in enumerate(decoded_predictions):
             src_ip = socket.inet_ntoa(struct.pack('>I', int(features_df.iloc[i]['source_ip'])))
             results.append({'source_ip': src_ip, 'prediction': pred})
         
-        # Check if any prediction indicates an attack
-        is_attack = any(pred.lower() in ['attack', 'malicious', 'intrusion'] for pred in decoded_predictions)
+        # Check if any prediction indicates an attack or DDoS
+        is_attack = any(pred.lower() in ['attack', 'malicious', 'intrusion', 'ddos'] for pred in decoded_predictions)
         
         # Handle attack detection
         if is_attack:
