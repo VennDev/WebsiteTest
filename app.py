@@ -68,7 +68,7 @@ DROP_COLS = [
 
 # Store request timestamps for each IP
 request_timestamps = defaultdict(list)
-# Store traffic samples for each IP (IP -> list of 50 stacks, each stack has 50 samples)
+# Store traffic samples for each IP (IP -> list of 50 stacks, each stack has 100 samples)
 traffic_samples_by_ip = defaultdict(lambda: [[] for _ in range(50)])  # 50 stacks per IP
 # Store current stack index for each IP
 current_stack_index = defaultdict(int)
@@ -92,7 +92,8 @@ network_data = {
     'fwd_segment_sizes': [],
     'bwd_segment_sizes': [],
     'init_win_forward': None,
-    'init_win_backward': None
+    'init_win_backward': None,
+    'udp_dest_ports': set()  # Track destination ports for UDP packets
 }
 
 def preprocess_data(data_df):
@@ -175,11 +176,15 @@ def packet_callback(packet):
                 network_data['bwd_segment_sizes'].append(len(packet[TCP]))
                 if network_data['init_win_backward'] is None:
                     network_data['init_win_backward'] = packet[TCP].window
+        
+        # Track UDP destination ports
+        if UDP in packet:
+            network_data['udp_dest_ports'].add(packet[UDP].dport)
 
 def process_network_data():
     """Process captured network data and calculate features"""
     current_time = time.time()
-    if current_time - network_data['last_processed'] < 5:
+    if current_time - network_data['last_processed'] < 2:  # Reduced from 5 to 2 seconds
         return None
 
     packets = network_data['packets']
@@ -240,6 +245,9 @@ def process_network_data():
     avg_bwd_segment_size = np.mean(network_data['bwd_segment_sizes']) if network_data['bwd_segment_sizes'] else 0
     min_seg_size_forward = min(network_data['fwd_segment_sizes']) if network_data['fwd_segment_sizes'] else 0
 
+    # Check UDP destination port consistency for LOIC detection
+    udp_port_consistency = len(network_data['udp_dest_ports']) <= 1  # True if all UDP packets target the same port
+
     # Reset data
     network_data['packets'] = []
     network_data['timestamps'] = []
@@ -260,6 +268,7 @@ def process_network_data():
     init_win_backward = network_data['init_win_backward']
     network_data['init_win_forward'] = None
     network_data['init_win_backward'] = None
+    network_data['udp_dest_ports'] = set()
 
     return {
         'protocol': protocol,
@@ -319,7 +328,8 @@ def process_network_data():
         'avg_bwd_segment_size': avg_bwd_segment_size,
         'init_win_bytes_forward': init_win_forward if init_win_forward is not None else 0,
         'init_win_bytes_backward': init_win_backward if init_win_backward is not None else 0,
-        'inbound': inbound
+        'inbound': inbound,
+        'udp_port_consistency': udp_port_consistency
     }
 
 def start_sniffing():
@@ -352,7 +362,7 @@ def index():
             'fwd_packet_length_mean': network_features.get('fwd_packet_length_mean', content_length),
             'fwd_packet_length_std': network_features.get('fwd_packet_length_std', 0),
             'bwd_packet_length_max': network_features.get('bwd_packet_length_max', 0),
-            'bwd_packet_length_min': network_features.get('bwd_packet_length_min', 0),
+            'bwd_packet_length_min': network_data.get('bwd_packet_length_min', 0),
             'bwd_packet_length_mean': network_features.get('bwd_packet_length_mean', 0),
             'bwd_packet_length_std': network_features.get('bwd_packet_length_std', 0),
             'flow_bytess': network_features.get('flow_bytess', 0),
@@ -425,19 +435,27 @@ def index():
         current_stack = traffic_samples_by_ip[ip_address][current_stack_index[ip_address]]
         current_stack.append(traffic_data)
         
-        if len(current_stack) > 50:
+        # Keep only the last 100 samples in the current stack
+        if len(current_stack) > 100:
             current_stack.pop(0)
         
         result, confidence = "Waiting for more data", 0.0
         is_attack = False
-        if len(current_stack) == 50:
+        if len(current_stack) == 100:  # Increased from 50 to 100
             traffic_df = pd.DataFrame(current_stack)
             result, confidence = analyze_traffic(traffic_df)
             is_attack = "attack" in result.lower()
             
             avg_flow_packetss = traffic_df['flow_packetss'].mean()
+            avg_packet_length_std = traffic_df['packet_length_std'].mean()
             protocol = 6 if traffic_df['total_fwd_packets'].sum() >= traffic_df['total_length_of_bwd_packets'].sum() else 17
-            if protocol == 17 and avg_flow_packetss > 100:
+            udp_port_consistency = network_features.get('udp_port_consistency', False)
+            
+            # Improved LOIC detection
+            if (protocol == 17 and 
+                avg_flow_packetss > 50 and  # Reduced from 100 to 50
+                avg_packet_length_std < 10 and  # Check for consistent packet sizes
+                udp_port_consistency):  # Check for consistent destination port
                 result = "LOIC UDP Flood"
                 confidence = 0.95
                 is_attack = True
@@ -446,19 +464,21 @@ def index():
                 confidence = 0.95
                 is_attack = True
             
+            # Store in history only after analysis
+            analysis_history.append({
+                'ip_address': ip_address,
+                'timestamp': current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'result': result,
+                'confidence': f"{confidence:.2%}",
+                'is_attack': is_attack
+            })
+            
+            # Keep only the last 100 entries to avoid memory issues
+            if len(analysis_history) > 100:
+                analysis_history.pop(0)
+            
             traffic_samples_by_ip[ip_address][current_stack_index[ip_address]] = []
             current_stack_index[ip_address] = (current_stack_index[ip_address] + 1) % 50
-    
-        analysis_history.append({
-            'ip_address': ip_address,
-            'timestamp': current_time.strftime('%Y-%m-%d %H:%M:%S'),
-            'result': result,
-            'confidence': f"{confidence:.2%}",
-            'is_attack': is_attack
-        })
-        
-        if len(analysis_history) > 100:
-            analysis_history.pop(0)
         
         return render_template('index.html', 
                             result=result,
