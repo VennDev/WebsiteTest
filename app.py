@@ -62,8 +62,9 @@ DROP_COLS = [
 request_log = defaultdict(list)
 # Store analysis history for dashboard
 analysis_history = []
-
-# Network traffic data storage
+# Store traffic data samples (up to 50)
+traffic_samples = []
+# Store raw network packets for processing
 network_data = {
     'packets': [],
     'timestamps': [],
@@ -71,45 +72,47 @@ network_data = {
     'last_processed': time.time()
 }
 
-def preprocess_data(data):
-    """Preprocess input data for model prediction"""
+def preprocess_data(data_df):
+    """Preprocess a DataFrame of traffic data for model prediction"""
     try:
-        # Convert to DataFrame
-        df = pd.DataFrame([data])
-        
         # Ensure all required features are present
         for feature in FEATURES:
-            if feature not in df.columns and feature not in DROP_COLS:
-                df[feature] = 0
+            if feature not in data_df.columns and feature not in DROP_COLS:
+                data_df[feature] = 0
         
         # Drop unnecessary columns, including label and attack_type
-        df = df.drop(columns=[col for col in DROP_COLS if col in df.columns], errors='ignore')
+        data_df = data_df.drop(columns=[col for col in DROP_COLS if col in data_df.columns], errors='ignore')
         
         # Scale numerical features
-        numerical_cols = df.select_dtypes(include=['int64', 'float64']).columns
+        numerical_cols = data_df.select_dtypes(include=['int64', 'float64']).columns
         if numerical_cols.empty:
             raise ValueError("No numerical columns to scale.")
         
-        logging.info(f"Columns before scaling: {df.columns.tolist()}")
-        df[numerical_cols] = scaler.transform(df[numerical_cols])
+        logging.info(f"Columns before scaling: {data_df.columns.tolist()}")
+        data_df[numerical_cols] = scaler.transform(data_df[numerical_cols])
         
-        return df
+        return data_df
     except Exception as e:
         logging.error(f"Error in preprocessing: {e}")
         raise
 
-def analyze_traffic(data):
-    """Analyze traffic data using the loaded model"""
+def analyze_traffic(data_df):
+    """Analyze a DataFrame of traffic data using the loaded model"""
     try:
         # Preprocess data
-        processed_data = preprocess_data(data)
+        processed_data = preprocess_data(data_df)
         
-        # Make prediction
-        prediction = model.predict(processed_data)
-        predicted_class = label_encoder.inverse_transform([np.argmax(prediction[0])])[0]
-        confidence = np.max(prediction[0])
+        # Make predictions for each sample
+        predictions = model.predict(processed_data)
+        predicted_classes = label_encoder.inverse_transform(np.argmax(predictions, axis=1))
+        confidences = np.max(predictions, axis=1)
         
-        return predicted_class, confidence
+        # Aggregate results: if more than 50% of samples are attacks, classify as attack
+        attack_count = sum(1 for pred in predicted_classes if pred.lower() in ['attack', 'ddos', 'loic', 'hoic'])
+        if attack_count > len(predicted_classes) * 0.5:  # More than 50% are attacks
+            return "DDoS Attack", np.mean(confidences)
+        else:
+            return "Normal", np.mean(confidences)
     except Exception as e:
         logging.error(f"Error in traffic analysis: {e}")
         return "Error", 0.0
@@ -162,7 +165,7 @@ def process_network_data():
 
     # Separate TCP and UDP packets
     tcp_packets = [pkt for pkt in packets if TCP in pkt]
-    udp_packets = [pkt in packets if UDP in pkt]
+    udp_packets = [pkt for pkt in packets if UDP in pkt]
     total_tcp_packets = len(tcp_packets)
     total_udp_packets = len(udp_packets)
 
@@ -205,6 +208,7 @@ def start_sniffing():
 
 @app.route('/')
 def index():
+    global traffic_samples
     try:
         ip_address = request.remote_addr
         current_time = datetime.now()
@@ -219,6 +223,7 @@ def index():
         # Get network data features
         network_features = process_network_data() or {}
 
+        # Create traffic data sample
         traffic_data = {
             'source_ip': ip_address,
             'destination_ip': request.host.split(':')[0],
@@ -306,21 +311,37 @@ def index():
             'inbound': 1
         }
         
-        # Analyze traffic
-        result, confidence = analyze_traffic(traffic_data)
+        # Add the sample to traffic_samples
+        traffic_samples.append(traffic_data)
         
-        # Determine if it's a potential DDoS attack
-        is_attack = result.lower() in ['attack', 'ddos', 'loic', 'hoic']
+        # Keep only the last 50 samples
+        if len(traffic_samples) > 50:
+            traffic_samples.pop(0)
         
-        # Manual threshold for UDP flood (LOIC) detection as a fallback
-        if traffic_data['protocol'] == 17 and traffic_data['flow_packetss'] > 100:  # High UDP packet rate
-            result = "LOIC UDP Flood"
-            confidence = 0.95
-            is_attack = True
-        elif traffic_data['protocol'] == 6 and http_request_rate > 50:  # High HTTP request rate
-            result = "HOIC HTTP Flood"
-            confidence = 0.95
-            is_attack = True
+        # Analyze traffic if we have 50 samples
+        result, confidence = "Waiting for more data", 0.0
+        is_attack = False
+        if len(traffic_samples) == 50:
+            # Convert traffic_samples to DataFrame
+            traffic_df = pd.DataFrame(traffic_samples)
+            
+            # Analyze traffic
+            result, confidence = analyze_traffic(traffic_df)
+            
+            # Determine if it's a potential DDoS attack
+            is_attack = "attack" in result.lower()
+            
+            # Manual threshold for UDP flood (LOIC) and HTTP flood (HOIC) detection
+            avg_flow_packetss = traffic_df['flow_packetss'].mean()
+            avg_http_request_rate = sum(len(request_log[ip]) / 60.0 for ip in request_log) / max(len(request_log), 1)
+            if traffic_df['protocol'].mode()[0] == 17 and avg_flow_packetss > 100:  # High UDP packet rate
+                result = "LOIC UDP Flood"
+                confidence = 0.95
+                is_attack = True
+            elif traffic_df['protocol'].mode()[0] == 6 and avg_http_request_rate > 50:  # High HTTP request rate
+                result = "HOIC HTTP Flood"
+                confidence = 0.95
+                is_attack = True
         
         # Store analysis result in history
         analysis_history.append({
